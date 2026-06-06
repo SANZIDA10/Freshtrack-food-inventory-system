@@ -1,0 +1,65 @@
+FreshTrack Database Design
+
+1. users
+	- Stores application users such as admin, manager, and staff.
+	- Key fields: user_id, full_name, email, phone, role, created_at.
+
+2. categories
+	- Stores food categories like dairy, vegetables, meat, and snacks.
+	- Key fields: category_id, category_name, description.
+
+3. suppliers
+	- Stores supplier master data.
+	- Key fields: supplier_id, supplier_name, contact_person, phone, email, address.
+
+4. products
+	- Stores food product master data.
+	- Key fields: product_id, category_id, product_name, brand, unit_of_measure, shelf_life_days, reorder_level, status.
+
+5. purchases
+	- Stores purchase headers from suppliers.
+	- Key fields: purchase_id, supplier_id, purchased_by, purchase_date, invoice_no, total_amount, status.
+
+6. batches
+	- Stores batch-level inventory records for each purchase item.
+	- Key fields: batch_id, purchase_id, product_id, batch_code, manufacture_date, expiry_date, quantity_received, quantity_available, unit_cost, storage_location, batch_status.
+
+7. inventory_movements
+	- Stores stock in, stock out, donation, waste, and adjustment actions.
+	- Key fields: movement_id, batch_id, user_id, movement_type, movement_date, quantity, reference_type, reference_id, notes.
+
+8. donations
+	- Stores donations made from near-expiry batches.
+	- Key fields: donation_id, batch_id, approved_by, donation_date, organization_name, quantity_donated, status.
+
+9. waste_records
+	- Stores expired or discarded stock.
+	- Key fields: waste_id, batch_id, recorded_by, waste_date, quantity_wasted, reason.
+
+10. alerts
+	 - Stores expiry, stock, and action alerts for dashboard use.
+	 - Key fields: alert_id, batch_id, alert_type, alert_date, status, message.
+
+Relationship Summary
+- One category has many products.
+- One supplier has many purchases.
+- One purchase has many batches.
+- One product can appear in many batches.
+- One batch can generate many inventory movements.
+- One batch can create donation or waste records.
+- One batch can have many alerts.
+
+Recommended Business Rules
+- product_name should be unique within a category.
+- quantity_available should never go below zero.
+- expiry_date should be greater than or equal to manufacture_date.
+- alerts should be generated for near-expiry batches.
+- donation quantity and waste quantity should not exceed available stock.
+
+Dashboard Outputs
+- Total products
+- Total available stock
+- Batches expiring in 7 days
+- Waste summary
+- Donation summary
+- Supplier purchase summary

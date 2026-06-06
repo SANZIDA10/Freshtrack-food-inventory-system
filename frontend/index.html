@@ -1,0 +1,178 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>FreshTrack | Smart Food Inventory</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="bg-orb orb-one"></div>
+  <div class="bg-orb orb-two"></div>
+
+  <div class="app-shell">
+    <aside class="sidebar">
+      <div>
+        <div class="brand-mark">FT</div>
+        <h1>FreshTrack</h1>
+        <p>Smart Food Inventory & Expiry Monitoring</p>
+      </div>
+
+      <nav class="nav-card">
+        <a class="active" href="#dashboard">Dashboard</a>
+        <a href="#inventory">Inventory</a>
+        <a href="#analytics">Analytics</a>
+        <a href="#alerts">Alerts</a>
+      </nav>
+
+      <div class="sidebar-note">
+        <span class="note-label">Lab focus</span>
+        <strong>DDL, joins, views, subqueries, and PL/SQL</strong>
+        <p>This UI is designed to match the database project you are building in Oracle and Laravel.</p>
+      </div>
+    </aside>
+
+    <main class="main-panel" id="dashboard">
+      <section class="hero-card">
+        <div>
+          <span class="eyebrow">FreshTrack Control Center</span>
+          <h2>Track inventory, expiry, waste, and donations from one dashboard.</h2>
+          <p>
+            Built to demonstrate database-backed management features such as search, sorting,
+            filtering, joins, views, and batch-level monitoring.
+          </p>
+        </div>
+        <div class="hero-actions">
+          <button class="primary-btn">Add Batch</button>
+          <button class="secondary-btn">Generate Alert Report</button>
+        </div>
+      </section>
+
+      <section class="stats-grid" id="analytics">
+        <article class="stat-card accent-a">
+          <span>Total Products</span>
+          <strong id="totalProducts">0</strong>
+          <small>Across all categories</small>
+        </article>
+        <article class="stat-card accent-b">
+          <span>Near Expiry</span>
+          <strong id="nearExpiry">0</strong>
+          <small>Expiring in 7 days</small>
+        </article>
+        <article class="stat-card accent-c">
+          <span>Low Stock</span>
+          <strong id="lowStock">0</strong>
+          <small>Below reorder level</small>
+        </article>
+        <article class="stat-card accent-d">
+          <span>Waste / Donation</span>
+          <strong id="wasteDonation">0</strong>
+          <small>Tracked actions</small>
+        </article>
+      </section>
+
+      <section class="toolbar-card">
+        <div class="search-box">
+          <label for="searchInput">Search</label>
+          <input id="searchInput" type="search" placeholder="Search product, batch, or supplier" />
+        </div>
+
+        <div class="filter-box">
+          <label for="categoryFilter">Category</label>
+          <select id="categoryFilter"></select>
+        </div>
+
+        <div class="filter-box">
+          <label for="statusFilter">Status</label>
+          <select id="statusFilter">
+            <option value="all">All Status</option>
+            <option value="in-stock">In Stock</option>
+            <option value="low-stock">Low Stock</option>
+            <option value="near-expiry">Near Expiry</option>
+            <option value="expired">Expired</option>
+          </select>
+        </div>
+
+        <div class="filter-box">
+          <label for="sortSelect">Sort By</label>
+          <select id="sortSelect">
+            <option value="expiry">Expiry Date</option>
+            <option value="stock">Available Stock</option>
+            <option value="name">Product Name</option>
+          </select>
+        </div>
+      </section>
+
+      <section class="content-grid" id="inventory">
+        <div class="inventory-panel">
+          <div class="section-heading">
+            <div>
+              <span class="eyebrow">Inventory</span>
+              <h3>Batch monitoring table</h3>
+            </div>
+            <span class="section-pill" id="resultCount">0 items</span>
+          </div>
+
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Batch</th>
+                  <th>Product</th>
+                  <th>Category</th>
+                  <th>Stock</th>
+                  <th>Expiry</th>
+                  <th>Supplier</th>
+                  <th>Status</th>
+                </tr>
+              </thead>
+              <tbody id="inventoryTable"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <aside class="side-stack">
+          <section class="summary-panel" id="alerts">
+            <div class="section-heading">
+              <div>
+                <span class="eyebrow">Alerts</span>
+                <h3>Consume first list</h3>
+              </div>
+            </div>
+            <div id="consumeList" class="stack-list"></div>
+          </section>
+
+          <section class="summary-panel">
+            <div class="section-heading">
+              <div>
+                <span class="eyebrow">Actions</span>
+                <h3>Activity summary</h3>
+              </div>
+            </div>
+            <div class="mini-grid">
+              <div class="mini-card">
+                <span>Purchases</span>
+                <strong>18</strong>
+              </div>
+              <div class="mini-card">
+                <span>Donations</span>
+                <strong>06</strong>
+              </div>
+              <div class="mini-card">
+                <span>Waste logs</span>
+                <strong>04</strong>
+              </div>
+              <div class="mini-card">
+                <span>Suppliers</span>
+                <strong>12</strong>
+              </div>
+            </div>
+          </section>
+        </aside>
+      </section>
+    </main>
+  </div>
+
+  <script src="app.js"></script>
+</body>
+</html>
