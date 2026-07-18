@@ -1,5 +1,3 @@
--- Sample data for FreshTrack.
-
 INSERT INTO categories (category_name, description) VALUES ('Dairy', 'Milk and dairy products');
 INSERT INTO categories (category_name, description) VALUES ('Bakery', 'Bread, cake, and baked items');
 INSERT INTO categories (category_name, description) VALUES ('Vegetables', 'Fresh produce items');
@@ -54,4 +52,6 @@ VALUES (3, 2, 3, 'Items damaged during transport');
 
 INSERT INTO alerts (batch_id, alert_type, status, message)
 VALUES (2, 'EXPIRY', 'OPEN', 'Bread batch is expiring soon');
+
+COMMIT;
 

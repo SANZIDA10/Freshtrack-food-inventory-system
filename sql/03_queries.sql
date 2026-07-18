@@ -1,4 +1,3 @@
--- Lab queries for FreshTrack.
 
 -- 1. Basic product list with category name.
 SELECT p.product_id, p.product_name, c.category_name, p.unit_of_measure, p.reorder_level

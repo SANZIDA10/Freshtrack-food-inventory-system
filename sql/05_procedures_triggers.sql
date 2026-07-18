@@ -1,4 +1,3 @@
--- PL/SQL procedures and triggers for FreshTrack.
 
 CREATE OR REPLACE PROCEDURE add_new_batch (
 	p_purchase_id IN NUMBER,
@@ -97,7 +96,7 @@ BEGIN
 END;
 /
 
-CREATE OR REPLACE TRIGGER trg_inventory_movement_update_stock
+CREATE OR REPLACE TRIGGER trg_inv_movement_upd_stock
 AFTER INSERT ON inventory_movements
 FOR EACH ROW
 BEGIN

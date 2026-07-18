@@ -4,6 +4,7 @@ use Illuminate\Support\Facades\Route;
 use App\Models\Category;
 use App\Models\Product;
 use Illuminate\Http\Request;
+use Illuminate\Support\Facades\DB;
 
 Route::get('/', function () {
 
@@ -72,4 +73,31 @@ Route::get('/reports', function () {
         'categoryBreakdown',
         'latestProducts'
     ));
+});
+
+Route::get('/expiry-alerts', function () {
+    $expiring = DB::select("
+        SELECT b.batch_id, b.batch_code, p.product_name, c.category_name,
+               b.expiry_date, b.quantity_available, b.batch_status,
+               ROUND(b.expiry_date - SYSDATE) AS days_until_expiry
+        FROM batches b
+        JOIN products p ON b.product_id = p.product_id
+        JOIN categories c ON p.category_id = c.category_id
+        WHERE b.expiry_date <= SYSDATE + 30
+        AND b.batch_status = 'IN_STOCK'
+        ORDER BY b.expiry_date ASC
+    ");
+
+    $expired = DB::select("
+        SELECT b.batch_id, b.batch_code, p.product_name, c.category_name,
+               b.expiry_date, b.quantity_available
+        FROM batches b
+        JOIN products p ON b.product_id = p.product_id
+        JOIN categories c ON p.category_id = c.category_id
+        WHERE b.expiry_date < SYSDATE
+        AND b.batch_status = 'IN_STOCK'
+        ORDER BY b.expiry_date ASC
+    ");
+
+    return view('expiry-alerts', compact('expiring', 'expired'));
 });

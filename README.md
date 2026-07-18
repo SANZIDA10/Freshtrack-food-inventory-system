@@ -3,7 +3,7 @@
 FreshTrack - Smart Food Inventory & Expiry Monitoring System
 
 ## Project Goal
-FreshTrack is a database-driven website project for managing food inventory, batches, expiry dates, supplier purchases, waste, and donations. The website should feel like a product management system with search, sort, filter, and view features, while the main academic focus stays on the database design, SQL, views, and PL/SQL logic.
+FreshTrack is a database-driven website project for managing food inventory, batches, expiry dates, supplier purchases, waste, and donations. The website should feel like a product management system with search, sort, filter, and view features, while the main academic focus stays on the Oracle database design, SQL, views, and PL/SQL logic.
 
 ## What This Project Covers
 - User and inventory management
@@ -16,7 +16,7 @@ FreshTrack is a database-driven website project for managing food inventory, bat
 - Dashboard analytics for inventory and expiry status
 
 ## Lab Topic Mapping
-- Lab-02 DDL and DML: create tables and insert sample records
+- Lab-02 DDL and DML: create Oracle tables and insert sample records
 - Lab-03 Constraints: primary key, foreign key, unique, not null, check, default
 - Lab-04 SELECT and aggregate functions: filters, counts, sums, grouping, sorting
 - Lab-05 Subquery, set operations, and views: expiring items, alerts, inventory summaries

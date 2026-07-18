@@ -1,4 +1,3 @@
--- Views for dashboard and reporting.
 
 CREATE OR REPLACE VIEW v_inventory_overview AS
 SELECT p.product_id,
