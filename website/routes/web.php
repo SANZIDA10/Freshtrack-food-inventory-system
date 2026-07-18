@@ -7,21 +7,18 @@ use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 
 Route::get('/', function () {
-
     $categories = Category::withCount('products')
         ->orderBy('category_name')
         ->get();
 
     $products = Product::with('category')
-                ->orderByDesc('product_id')
-                ->take(6)
-                ->get();
+        ->orderByDesc('product_id')
+        ->take(6)
+        ->get();
 
-    return view('home', compact(
-        'categories',
-        'products'
-    ));
+    return view('home', compact('categories', 'products'));
 });
+
 
 Route::get('/inventory', function (Request $request) {
     $q = $request->get('q');
@@ -100,4 +97,54 @@ Route::get('/expiry-alerts', function () {
     ");
 
     return view('expiry-alerts', compact('expiring', 'expired'));
+});
+
+Route::get('/products/{id}/batches', function ($id) {
+    $product = DB::table('products')->where('product_id', $id)->first();
+
+    if (!$product) {
+        abort(404, 'Product not found');
+    }
+
+    $batches = DB::table('batches')
+        ->where('product_id', $id)
+        ->orderBy('expiry_date', 'asc')
+        ->get();
+
+    return view('batch-details', compact('product', 'batches'));
+})->name('products.batches');
+
+Route::get('/suppliers', function () {
+    $suppliers = DB::table('suppliers')
+        ->orderBy('supplier_name')
+        ->get();
+
+    return view('suppliers', compact('suppliers'));
+});
+
+Route::get('/consume-first', function () {
+    
+    $recommendations = DB::select("SELECT * FROM v_consume_first");
+
+    return view('consume-first', compact('recommendations'));
+});
+
+Route::get('/waste-summary', function () {
+    $summary = DB::select("SELECT * FROM v_waste_summary");
+    return view('waste-summary', compact('summary'));
+});
+
+Route::get('/purchase-history', function () {
+    $purchases = DB::table('purchases')
+        ->join('suppliers', 'purchases.supplier_id', '=', 'suppliers.supplier_id')
+        ->select(
+            'purchases.purchase_id',
+            'purchases.purchase_date',
+            'purchases.total_amount',
+            'suppliers.supplier_name'
+        )
+        ->orderByDesc('purchases.purchase_date')
+        ->get();
+
+    return view('purchase-history', compact('purchases'));
 });

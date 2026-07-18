@@ -31,12 +31,6 @@
             color: var(--ft-text);
         }
 
-        .ft-topbar {
-            background: #ffffff;
-            border-bottom: 1px solid rgba(36, 27, 85, 0.08);
-            padding: 0.85rem 1.5rem;
-        }
-
         .ft-shell {
             background: var(--ft-navy);
             color: #fff;
@@ -164,7 +158,7 @@
         .ft-footer { background: var(--ft-navy); color: rgba(255, 255, 255, 0.62); text-align: center; padding: 1rem; margin-top: 2rem; }
 
         @media (max-width: 991.98px) {
-            .ft-topbar .navbar-nav, .ft-shell .navbar-nav { flex-direction: row; flex-wrap: wrap; }
+            .ft-shell .navbar-nav { flex-direction: row; flex-wrap: wrap; }
             .ft-search { width: 100%; margin-top: 0.75rem; }
             .ft-search .form-control { min-width: 0; width: 100%; }
             .ft-stat-grid { grid-template-columns: 1fr; max-width: 100%; }
@@ -173,18 +167,6 @@
     </style>
 </head>
 <body>
-
-<nav class="ft-topbar navbar navbar-expand-lg">
-    <div class="container-fluid px-0">
-        <div class="navbar-nav flex-row gap-2 ft-pill-nav">
-            <a class="nav-link {{ request()->is('/') ? 'active' : '' }}" href="/">Home</a>
-            <a class="nav-link {{ request()->is('inventory') ? 'active' : '' }}" href="/inventory">Inventory</a>
-            <a class="nav-link {{ request()->is('categories') ? 'active' : '' }}" href="/categories">Categories</a>
-            <a class="nav-link {{ request()->is('reports') ? 'active' : '' }}" href="/reports">Reports</a>
-            <a class="nav-link alert-link {{ request()->is('expiry-alerts') ? 'active' : '' }}" href="/expiry-alerts">⚠ Expiry Alerts</a>
-        </div>
-    </div>
-</nav>
 
 <nav class="ft-shell navbar navbar-expand-lg">
     <div class="container-fluid px-0 d-flex align-items-center gap-3 flex-wrap">
@@ -195,6 +177,10 @@
             <a class="nav-link {{ request()->is('categories') ? 'active' : '' }}" href="/categories">Categories</a>
             <a class="nav-link {{ request()->is('reports') ? 'active' : '' }}" href="/reports">Reports</a>
             <a class="nav-link alert-link {{ request()->is('expiry-alerts') ? 'active' : '' }}" href="/expiry-alerts">⚠ Expiry Alerts</a>
+            <a class="nav-link {{ request()->is('suppliers') ? 'active' : '' }}" href="/suppliers">Suppliers</a>
+            <a class="nav-link {{ request()->is('consume-first') ? 'active' : '' }}" href="/consume-first">Consume First</a>
+            <a class="nav-link {{ request()->is('waste-summary') ? 'active' : '' }}" href="/waste-summary">Waste Summary</a>
+            <a class="nav-link {{ request()->is('purchase-history') ? 'active' : '' }}" href="/purchase-history">Purchases</a>
         </div>
         <form class="d-flex ft-search ms-auto" role="search" action="/inventory" method="get">
             <input name="q" value="{{ request('q') }}" class="form-control form-control-sm me-2" type="search" placeholder="Search products..." aria-label="Search">
