@@ -7,10 +7,12 @@ use Illuminate\Http\Request;
 
 Route::get('/', function () {
 
-    $categories = Category::with('products')->get();
+    $categories = Category::withCount('products')
+        ->orderBy('category_name')
+        ->get();
 
     $products = Product::with('category')
-                ->latest()
+                ->orderByDesc('product_id')
                 ->take(6)
                 ->get();
 
@@ -25,12 +27,13 @@ Route::get('/inventory', function (Request $request) {
 
     $products = Product::with('category')
         ->when($q, function ($query, $q) {
-            $query->where('name', 'like', "%{$q}%")
+            $query->where('product_name', 'like', "%{$q}%")
+                  ->orWhere('brand', 'like', "%{$q}%")
                   ->orWhereHas('category', function ($q2) use ($q) {
-                      $q2->where('name', 'like', "%{$q}%");
+                      $q2->where('category_name', 'like', "%{$q}%");
                   });
         })
-        ->latest()
+        ->orderByDesc('product_id')
         ->paginate(12);
 
     return view('inventory', compact('products', 'q'));
@@ -38,8 +41,8 @@ Route::get('/inventory', function (Request $request) {
 
 Route::get('/categories', function () {
     $categories = Category::withCount('products')
-        ->withSum('products', 'price')
-        ->orderBy('name')
+        ->withAvg('products', 'reorder_level')
+        ->orderBy('category_name')
         ->get();
 
     return view('categories', compact('categories'));
@@ -48,22 +51,24 @@ Route::get('/categories', function () {
 Route::get('/reports', function () {
     $totalCategories = Category::count();
     $totalProducts = Product::count();
-    $totalValue = Product::sum('price');
+    $activeProducts = Product::where('status', 'ACTIVE')->count();
+    $averageShelfLife = Product::avg('shelf_life_days');
 
     $categoryBreakdown = Category::withCount('products')
-        ->withSum('products', 'price')
+        ->withAvg('products', 'reorder_level')
         ->orderByDesc('products_count')
         ->get();
 
     $latestProducts = Product::with('category')
-        ->latest()
+        ->orderByDesc('product_id')
         ->take(5)
         ->get();
 
     return view('reports', compact(
         'totalCategories',
         'totalProducts',
-        'totalValue',
+        'activeProducts',
+        'averageShelfLife',
         'categoryBreakdown',
         'latestProducts'
     ));

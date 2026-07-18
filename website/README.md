@@ -62,7 +62,27 @@ The Laravel framework is open-sourced software licensed under the [MIT license](
 
 ## Quick: Run the FreshTrack demo
 
-From the `website` folder run these commands to start a local development server (requires PHP, Composer):
+From the `website` folder, install the Oracle driver first, then start the app:
+
+```bash
+composer require yajra/laravel-oci8:^12.0
+```
+
+If your PHP install does not already include Oracle support, enable the `oci8` extension first. Then set the Oracle connection values in `.env`:
+
+```env
+DB_CONNECTION=oracle
+DB_HOST=127.0.0.1
+DB_PORT=1521
+DB_DATABASE=xe
+DB_SERVICE_NAME=orcl
+DB_USERNAME=hr
+DB_PASSWORD=hr
+DB_CHARSET=AL32UTF8
+DB_SERVER_VERSION=12c
+```
+
+After that, run the app:
 
 ```bash
 composer install
@@ -72,5 +92,7 @@ php artisan migrate --seed   # optional if you have migrations and seeders
 php artisan serve --host=127.0.0.1 --port=8000
 # open http://127.0.0.1:8000 in your browser
 ```
+
+The project uses the `yajra/laravel-oci8` driver for Oracle access.
 
 Use the search box in the top navbar to search products or categories — it submits to `/inventory?q=...`.
