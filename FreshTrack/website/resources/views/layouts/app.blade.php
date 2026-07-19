@@ -174,6 +174,7 @@
         <div class="navbar-nav flex-row gap-1 ft-pill-nav me-auto">
             <a class="nav-link {{ request()->is('/') ? 'active' : '' }}" href="/">Home</a>
             <a class="nav-link {{ request()->is('inventory') ? 'active' : '' }}" href="/inventory">Inventory</a>
+            <a class="nav-link {{ request()->is('admin*') ? 'active' : '' }}" href="/admin/login">Admin</a>
             <a class="nav-link {{ request()->is('categories') ? 'active' : '' }}" href="/categories">Categories</a>
             <a class="nav-link {{ request()->is('reports') ? 'active' : '' }}" href="/reports">Reports</a>
             <a class="nav-link alert-link {{ request()->is('expiry-alerts') ? 'active' : '' }}" href="/expiry-alerts">⚠ Expiry Alerts</a>

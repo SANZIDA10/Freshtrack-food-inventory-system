@@ -154,3 +154,140 @@ Route::get('/purchase-history', function () {
 
     return view('purchase-history', compact('purchases'));
 });
+
+Route::middleware(['web'])->group(function () {
+    Route::get('/admin/login', function (Request $request) {
+        return view('admin.login');
+    })->name('admin.login');
+
+    Route::post('/admin/login', function (Request $request) {
+        $email = $request->input('email');
+        $password = $request->input('password');
+        $remember = (bool) $request->input('remember');
+
+        if ($email === 'admin@freshtrack.com' && $password === 'admin123') {
+            $request->session()->put('is_admin', true);
+
+            if ($remember) {
+                $token = hash('sha256', $email . '|' . $password);
+                return redirect()->route('admin.dashboard')->withCookie(cookie()->forever('admin_remember', $token));
+            }
+
+            return redirect()->route('admin.dashboard')->withCookie(cookie()->forget('admin_remember'));
+        }
+
+        return back()->withErrors(['email' => 'Invalid admin credentials.']);
+    })->name('admin.login.submit');
+
+    Route::post('/admin/logout', function (Request $request) {
+        $request->session()->forget('is_admin');
+        return redirect()->route('admin.login')->withCookie(cookie()->forget('admin_remember'));
+    })->name('admin.logout');
+});
+
+Route::middleware(['web', 'admin.auth'])->group(function () {
+    Route::get('/admin/dashboard', function () {
+        $totalProducts = Product::count();
+        $totalCategories = Category::count();
+        $activeProducts = Product::where('status', 'ACTIVE')->count();
+
+        return view('admin.dashboard', compact('totalProducts', 'totalCategories', 'activeProducts'));
+    })->name('admin.dashboard');
+
+    Route::get('/admin/products', function (Request $request) {
+        $search = $request->input('search');
+
+        $products = Product::with('category')
+            ->when($search, function ($query, $search) {
+                $query->where('product_name', 'like', "%{$search}%")
+                    ->orWhere('brand', 'like', "%{$search}%");
+            })
+            ->orderByDesc('product_id')
+            ->paginate(8)
+            ->appends($request->query());
+
+        return view('admin.products.index', compact('products', 'search'));
+    })->name('admin.products.index');
+
+    Route::get('/admin/products/create', function () {
+        $categories = Category::orderBy('category_name')->get();
+        return view('admin.products.create', compact('categories'));
+    })->name('admin.products.create');
+
+    Route::post('/admin/products', function (Request $request) {
+        $data = $request->validate([
+            'category_id' => 'required|exists:categories,category_id',
+            'product_name' => 'required|string|max:255',
+            'brand' => 'nullable|string|max:255',
+            'unit_of_measure' => 'required|string|max:50',
+            'shelf_life_days' => 'required|integer|min:1',
+            'reorder_level' => 'required|integer|min:0',
+            'status' => 'required|in:ACTIVE,INACTIVE',
+            'image' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:2048',
+        ], [
+            'product_name.required' => 'Please enter a product name.',
+            'shelf_life_days.min' => 'Shelf life must be at least 1 day.',
+            'image.image' => 'The uploaded file must be an image.',
+        ]);
+
+        if ($request->hasFile('image')) {
+            $path = $request->file('image')->store('products', 'public');
+            $data['image_path'] = $path;
+        }
+
+        Product::create($data);
+
+        return redirect()->route('admin.products.index')->with('success', 'Product created successfully.');
+    })->name('admin.products.store');
+
+    Route::get('/admin/products/{product}/edit', function (Product $product) {
+        $categories = Category::orderBy('category_name')->get();
+        return view('admin.products.edit', compact('product', 'categories'));
+    })->name('admin.products.edit');
+
+    Route::put('/admin/products/{product}', function (Request $request, Product $product) {
+        $data = $request->validate([
+            'category_id' => 'required|exists:categories,category_id',
+            'product_name' => 'required|string|max:255',
+            'brand' => 'nullable|string|max:255',
+            'unit_of_measure' => 'required|string|max:50',
+            'shelf_life_days' => 'required|integer|min:1',
+            'reorder_level' => 'required|integer|min:0',
+            'status' => 'required|in:ACTIVE,INACTIVE',
+            'image' => 'nullable|image|mimes:jpg,jpeg,png,webp|max:2048',
+        ], [
+            'product_name.required' => 'Please enter a product name.',
+            'shelf_life_days.min' => 'Shelf life must be at least 1 day.',
+            'image.image' => 'The uploaded file must be an image.',
+        ]);
+
+        if ($request->hasFile('image')) {
+            $path = $request->file('image')->store('products', 'public');
+            $data['image_path'] = $path;
+        }
+
+        $product->update($data);
+
+        return redirect()->route('admin.products.index')->with('success', 'Product updated successfully.');
+    })->name('admin.products.update');
+
+    Route::delete('/admin/products/{product}', function (Product $product) {
+        $product->delete();
+
+        return redirect()->route('admin.products.index')->with('success', 'Product deleted successfully.');
+    })->name('admin.products.destroy');
+});
+
+Route::get('/api/documentation', function () {
+    return view('api.documentation');
+})->name('api.documentation');
+
+Route::middleware(['api.key'])->group(function () {
+    Route::get('/api/products', function () {
+        return response()->json(Product::with('category')->orderByDesc('product_id')->get());
+    });
+
+    Route::get('/api/categories', function () {
+        return response()->json(Category::orderBy('category_name')->get());
+    });
+});
