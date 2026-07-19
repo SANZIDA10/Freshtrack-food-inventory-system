@@ -174,7 +174,6 @@
         <div class="navbar-nav flex-row gap-1 ft-pill-nav me-auto">
             <a class="nav-link {{ request()->is('/') ? 'active' : '' }}" href="/">Home</a>
             <a class="nav-link {{ request()->is('inventory') ? 'active' : '' }}" href="/inventory">Inventory</a>
-            <a class="nav-link {{ request()->is('admin*') ? 'active' : '' }}" href="/admin/login">Admin</a>
             <a class="nav-link {{ request()->is('categories') ? 'active' : '' }}" href="/categories">Categories</a>
             <a class="nav-link {{ request()->is('reports') ? 'active' : '' }}" href="/reports">Reports</a>
             <a class="nav-link alert-link {{ request()->is('expiry-alerts') ? 'active' : '' }}" href="/expiry-alerts">⚠ Expiry Alerts</a>
@@ -187,6 +186,29 @@
             <input name="q" value="{{ request('q') }}" class="form-control form-control-sm me-2" type="search" placeholder="Search products..." aria-label="Search">
             <button class="btn btn-sm" type="submit">Search</button>
         </form>
+        <div class="d-flex align-items-center gap-2 ms-2">
+            @if(session('is_admin'))
+                <div class="dropdown">
+                    <button class="btn btn-sm btn-outline-light dropdown-toggle d-flex align-items-center gap-1" type="button" id="adminDropdown" data-bs-toggle="dropdown" aria-expanded="false" style="border-radius: 999px; font-weight: 700; padding: 0.35rem 0.85rem; border-color: rgba(255, 255, 255, 0.25);">
+                        👤 Admin
+                    </button>
+                    <ul class="dropdown-menu dropdown-menu-end shadow" aria-labelledby="adminDropdown" style="border-radius: 0.75rem; border: 1px solid var(--ft-border); background-color: #ffffff; color: var(--ft-text); margin-top: 0.5rem;">
+                        <li><a class="dropdown-item" href="{{ route('admin.dashboard') }}">📂 Dashboard</a></li>
+                        <li><hr class="dropdown-divider"></li>
+                        <li>
+                            <form action="{{ route('admin.logout') }}" method="POST" class="d-inline">
+                                @csrf
+                                <button type="submit" class="dropdown-item text-danger">🚪 Logout</button>
+                            </form>
+                        </li>
+                    </ul>
+                </div>
+            @else
+                <a href="{{ route('admin.login') }}" class="btn btn-sm btn-outline-light d-flex align-items-center gap-1" style="border-radius: 999px; font-weight: 700; padding: 0.35rem 0.85rem; border-color: rgba(255, 255, 255, 0.25);">
+                    👤 Login
+                </a>
+            @endif
+        </div>
     </div>
 </nav>
 
@@ -198,5 +220,6 @@
     © 2026 FreshTrack · Smart Food Inventory System
 </footer>
 
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
 </body>
 </html>
