@@ -32,11 +32,11 @@
                                 </td>
                                 <td class="fw-bold text-dark">{{ $row->product_name ?? 'Unknown Product' }}</td>
                                 <td><code>{{ $row->batch_code ?? 'N/A' }}</code></td>
-                                <td class="fw-bold text-warning-dominant">{{ $row->quantity_available ?? $row->quantity ?? 0 }}</td>
-                                <td class="text-danger fw-medium">{{ $row->expiry_date }}</td>
+                                <td class="fw-bold text-warning-dominant">{{ $row->quantity_available ?? 0 }}</td>
+                                <td class="text-danger fw-medium">{{ $row->expiry_date ? \Carbon\Carbon::parse($row->expiry_date)->format('d M Y') : 'N/A' }}</td>
                                 <td class="pe-4">
                                     <span class="text-success fw-semibold">
-                                        ✨ Use this batch first!
+                                        {{ $row->consume_priority ?? 'Use this batch first!' }}
                                     </span>
                                 </td>
                             </tr>

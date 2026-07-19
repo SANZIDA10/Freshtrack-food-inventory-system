@@ -13,12 +13,12 @@ return new class extends Migration
     public function up(): void
     {
         Schema::create('users', function (Blueprint $table) {
-            $table->id('user_id');
+            $table->bigIncrements('user_id');
             $table->string('full_name', 120);
             $table->string('email', 120)->unique();
             $table->string('phone', 20)->nullable();
             $table->string('role', 20)->default('STAFF');
-            $table->date('created_at')->default(DB::raw('SYSDATE'));
+            $table->timestamp('created_at')->useCurrent();
         });
 
         Schema::create('password_reset_tokens', function (Blueprint $table) {

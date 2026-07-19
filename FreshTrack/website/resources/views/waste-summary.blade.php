@@ -36,14 +36,9 @@
                             <tbody>
                                 @forelse($summary as $row)
                                     @php
-                                        
-                                        $rowArray = (array) $row;
-                                        $statusKey = array_key_first($rowArray); 
-                                        
-                                        
-                                        $displayStatus = $row->status ?? $row->batch_status ?? $row->BATCH_STATUS ?? $rowArray[$statusKey] ?? 'Unknown';
-                                        $totalBatches = $row->total_batches ?? $row->TOTAL_BATCHES ?? 0;
-                                        $totalQuantity = $row->total_quantity ?? $row->TOTAL_QUANTITY ?? 0;
+                                        $displayStatus = $row->status ?? 'Unknown';
+                                        $totalBatches = $row->total_batches ?? 0;
+                                        $totalQuantity = $row->total_quantity ?? 0;
                                     @endphp
                                     <tr>
                                         <td class="ps-3 fw-bold">
@@ -78,14 +73,8 @@
         const summaryData = @json($summary);
         
         if(summaryData.length > 0) {
-            
-            const sample = summaryData[0];
-            const keys = Object.keys(sample);
-            const statusKey = keys[0]; 
-            const quantityKey = keys.find(k => k.toLowerCase().includes('quantity')) || keys[2] || keys[1];
-
-            const labels = summaryData.map(item => item.status || item.batch_status || item.BATCH_STATUS || item[statusKey]);
-            const quantities = summaryData.map(item => item.total_quantity || item.TOTAL_QUANTITY || item[quantityKey] || 0);
+            const labels = summaryData.map(item => item.status || 'Unknown');
+            const quantities = summaryData.map(item => item.total_quantity || 0);
 
             new Chart(ctx, {
                 type: 'pie',

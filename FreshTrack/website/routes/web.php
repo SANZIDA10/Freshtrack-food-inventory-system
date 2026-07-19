@@ -73,28 +73,24 @@ Route::get('/reports', function () {
 });
 
 Route::get('/expiry-alerts', function () {
-    $expiring = DB::select("
-        SELECT b.batch_id, b.batch_code, p.product_name, c.category_name,
-               b.expiry_date, b.quantity_available, b.batch_status,
-               ROUND(b.expiry_date - SYSDATE) AS days_until_expiry
-        FROM batches b
-        JOIN products p ON b.product_id = p.product_id
-        JOIN categories c ON p.category_id = c.category_id
-        WHERE b.expiry_date <= SYSDATE + 30
-        AND b.batch_status = 'IN_STOCK'
-        ORDER BY b.expiry_date ASC
-    ");
+    $expiring = DB::table('batches as b')
+        ->join('products as p', 'b.product_id', '=', 'p.product_id')
+        ->join('categories as c', 'p.category_id', '=', 'c.category_id')
+        ->select('b.batch_id', 'b.batch_code', 'p.product_name', 'c.category_name', 'b.expiry_date', 'b.quantity_available', 'b.batch_status')
+        ->selectRaw('TIMESTAMPDIFF(DAY, CURDATE(), b.expiry_date) AS days_until_expiry')
+        ->where('b.expiry_date', '<=', DB::raw('DATE_ADD(CURDATE(), INTERVAL 30 DAY)'))
+        ->where('b.batch_status', 'IN_STOCK')
+        ->orderBy('b.expiry_date')
+        ->get();
 
-    $expired = DB::select("
-        SELECT b.batch_id, b.batch_code, p.product_name, c.category_name,
-               b.expiry_date, b.quantity_available
-        FROM batches b
-        JOIN products p ON b.product_id = p.product_id
-        JOIN categories c ON p.category_id = c.category_id
-        WHERE b.expiry_date < SYSDATE
-        AND b.batch_status = 'IN_STOCK'
-        ORDER BY b.expiry_date ASC
-    ");
+    $expired = DB::table('batches as b')
+        ->join('products as p', 'b.product_id', '=', 'p.product_id')
+        ->join('categories as c', 'p.category_id', '=', 'c.category_id')
+        ->select('b.batch_id', 'b.batch_code', 'p.product_name', 'c.category_name', 'b.expiry_date', 'b.quantity_available')
+        ->where('b.expiry_date', '<', DB::raw('CURDATE()'))
+        ->where('b.batch_status', 'IN_STOCK')
+        ->orderBy('b.expiry_date')
+        ->get();
 
     return view('expiry-alerts', compact('expiring', 'expired'));
 });
@@ -123,14 +119,24 @@ Route::get('/suppliers', function () {
 });
 
 Route::get('/consume-first', function () {
-    
-    $recommendations = DB::select("SELECT * FROM v_consume_first");
+    $recommendations = DB::table('batches as b')
+        ->join('products as p', 'b.product_id', '=', 'p.product_id')
+        ->select('b.batch_id', 'b.batch_code', 'p.product_name', 'b.quantity_available', 'b.expiry_date')
+        ->selectRaw("CASE WHEN b.expiry_date <= DATE_ADD(CURRENT_DATE, INTERVAL 3 DAY) THEN 'HIGH PRIORITY' WHEN b.expiry_date <= DATE_ADD(CURRENT_DATE, INTERVAL 7 DAY) THEN 'MEDIUM PRIORITY' ELSE 'NORMAL' END AS consume_priority")
+        ->orderBy('b.expiry_date', 'asc')
+        ->get();
 
     return view('consume-first', compact('recommendations'));
 });
 
 Route::get('/waste-summary', function () {
-    $summary = DB::select("SELECT * FROM v_waste_summary");
+    $summary = DB::table('waste_records as wr')
+        ->join('batches as b', 'wr.batch_id', '=', 'b.batch_id')
+        ->join('products as p', 'b.product_id', '=', 'p.product_id')
+        ->selectRaw("'WASTED' AS status, COUNT(*) AS total_batches, SUM(wr.quantity_wasted) AS total_quantity")
+        ->groupBy('status')
+        ->get();
+
     return view('waste-summary', compact('summary'));
 });
 
