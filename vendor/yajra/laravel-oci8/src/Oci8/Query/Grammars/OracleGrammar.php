@@ -1,0 +1,1426 @@
+<?php
+
+namespace Yajra\Oci8\Query\Grammars;
+
+use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
+use Illuminate\Database\Query\Builder;
+use Illuminate\Database\Query\Expression;
+use Illuminate\Database\Query\Grammars\Grammar;
+use Illuminate\Database\Query\JoinLateralClause;
+use Illuminate\Support\Arr;
+use Illuminate\Support\Str;
+use JsonSerializable;
+use RuntimeException;
+use stdClass;
+use Yajra\Oci8\Oci8Connection;
+use Yajra\Oci8\OracleReservedWords;
+
+/**
+ * @property Oci8Connection $connection
+ */
+class OracleGrammar extends Grammar
+{
+    use OracleReservedWords;
+
+    /**
+     * Indicates whether the truncate statement should cascade.
+     */
+    protected static bool $cascadeTruncate = false;
+
+    /**
+     * The keyword identifier wrapper format.
+     */
+    protected string $wrapper = '%s';
+
+    protected string $schemaPrefix = '';
+
+    protected int $maxLength;
+
+    public function __construct(Oci8Connection $connection)
+    {
+        parent::__construct($connection);
+
+        $this->setSchemaPrefix($connection->getSchemaPrefix());
+        $this->setMaxLength($connection->getMaxLength());
+    }
+
+    /**
+     * @var int
+     */
+    protected $labelSearchFullText = 1;
+
+    /**
+     * Compile a delete statement with joins into SQL.
+     *
+     * @param  string  $table
+     * @param  string  $where
+     */
+    protected function compileDeleteWithJoins(Builder $query, $table, $where): string
+    {
+        $alias = last(explode(' as ', $table));
+
+        $joins = $this->compileJoins($query, $query->joins);
+
+        return "delete (select * from {$alias} {$joins} {$where})";
+    }
+
+    /**
+     * Compile an exists statement into SQL.
+     */
+    public function compileExists(Builder $query): string
+    {
+        $q = clone $query;
+        $q->columns = [];
+        $q->selectRaw('1 as "exists"')
+            ->whereRaw('rownum = 1');
+
+        return $this->compileSelect($q);
+    }
+
+    /**
+     * Compile a select query into SQL.
+     */
+    public function compileSelect(Builder $query): string
+    {
+        if (($query->unions || $query->havings) && $query->aggregate) {
+            return $this->compileUnionAggregate($query);
+        }
+
+        if (isset($query->groupLimit)) {
+            if (is_null($query->columns)) {
+                $query->columns = ['*'];
+            }
+
+            return $this->compileGroupLimit($query);
+        }
+
+        // If the query does not have any columns set, we'll set the columns to the
+        // * character to just get all of the columns from the database. Then we
+        // can build the query and concatenate all the pieces together as one.
+        $original = $query->columns;
+
+        if (is_null($query->columns)) {
+            $query->columns = ['*'];
+        }
+
+        // To compile the query, we'll spin through each component of the query and
+        // see if that component exists. If it does, we'll just call the compiler
+        // function for the component which is responsible for making the SQL.
+        $components = $this->compileComponents($query);
+        unset($components['lock']);
+
+        if (isset($query->lock) && isset($query->limit)) {
+            unset($components['orders']);
+        }
+
+        $sql = trim($this->concatenate($components));
+
+        if ($query->unions) {
+            $sql = $this->wrapUnion($sql).' '.$this->compileUnions($query);
+        }
+
+        if (isset($query->limit) || isset($query->offset)) {
+            $sql = $this->compileAnsiOffset($query, $components);
+        }
+
+        if ($query->unions && (isset($query->unionLimit) || isset($query->unionOffset))) {
+            $sql = $this->compileUnionLimitOffset($query, trim($sql));
+        }
+
+        if (isset($query->lock)) {
+            $sql .= ' '.$this->compileLock($query, $query->lock);
+            $orderSql = $this->compileOrders($query, $query->orders);
+
+            /**
+             * Check if the original SQL already contains an ORDER BY clause.
+             */
+            $hasOrderInSql = stripos($sql, 'order by') !== false;
+
+            /**
+             * Determine whether to append the ORDER BY clause:
+             * - Append ORDER BY only if $orderSql is not empty
+             * - Append ORDER BY only if the original SQL does NOT already contain ORDER BY
+             *
+             * This prevents duplicate ORDER BY clauses causing SQL syntax errors.
+             *
+             * Note:
+             * - If LIMIT is set, we want ORDER BY for consistent pagination, but
+             *   we still avoid appending ORDER BY if it's already present in $sql.
+             */
+            $appendOrder = ! empty($orderSql) && ! $hasOrderInSql;
+
+            if ($appendOrder) {
+                $sql .= " {$orderSql}";
+            }
+        }
+
+        $query->columns = $original;
+
+        /**
+         * withExists fix for oracle
+         * Since we can't modify laravel code in (vendor/laravel/framework/src/Illuminate/Database/Eloquent/Concerns/QueriesRelationships.php:922) we modify the inner query placing 2 placeholders and replacing the 2 placeholders in the outer query.
+         * Absolute black magic.
+         */
+        if (isset($query->columns[0]) && $this->isExpression($query->columns[0]) && $this->getValue($query->columns[0]) === '*') {
+            $backtrace = debug_backtrace(DEBUG_BACKTRACE_PROVIDE_OBJECT, 3);
+            if ($backtrace[2]['function'] === 'withAggregate' && $backtrace[2]['args'][2] === 'exists' && $backtrace[2]['args'][1] === '*') {
+                $sql = '--withExistsPlaceholder'.$sql.'withExistsPlaceholder--';
+                $query->columns = [new Expression('1')];
+            }
+        } else {
+            $sql = str_replace(['exists(--withExistsPlaceholder', 'withExistsPlaceholder--)'], ['CASE WHEN EXISTS(', ') THEN 1 ELSE 0 END'], $sql);
+        }
+
+        return trim($sql);
+    }
+
+    /**
+     * Compile a group limit clause.
+     */
+    protected function compileGroupLimit(Builder $query): string
+    {
+        $selectBindings = array_merge($query->getRawBindings()['select'], $query->getRawBindings()['order']);
+
+        $query->setBindings($selectBindings, 'select');
+        $query->setBindings([], 'order');
+
+        if ($query->columns === ['*'] && is_string($query->from)) {
+            $segments = preg_split('/\s+(?:as\s+)?/i', trim($query->from));
+            $qualifier = count($segments) > 1 ? end($segments) : $query->from;
+
+            $query->columns = [$qualifier.'.*'];
+        }
+
+        $limit = (int) $query->groupLimit['value'];
+        $offset = $query->offset;
+
+        if (isset($offset)) {
+            $offset = (int) $offset;
+            $limit += $offset;
+
+            $query->offset = null;
+        }
+
+        $components = $this->compileComponents($query);
+
+        $components['columns'] .= $this->compileRowNumber(
+            $query->groupLimit['column'],
+            $components['orders'] ?? ''
+        );
+
+        unset($components['orders']);
+
+        $table = $this->wrap('laravel_table');
+        $row = $this->wrap('laravel_row');
+
+        $sql = $this->concatenate($components);
+        $sql = "select * from ({$sql}) {$table} where {$row} <= {$limit}";
+
+        if (isset($offset)) {
+            $sql .= " and {$row} > {$offset}";
+        }
+
+        return $sql." order by {$row}";
+    }
+
+    /**
+     * Compile a row number clause.
+     */
+    protected function compileRowNumber($partition, $orders): string
+    {
+        return parent::compileRowNumber($partition, $orders ?: 'order by null');
+    }
+
+    /**
+     * Create a full ANSI offset clause for the query.
+     */
+    protected function compileAnsiOffset(Builder $query, array $components): string
+    {
+        // Improved response time with FIRST_ROWS(n) hint for ORDER BY queries (only when no locks used else it results in ORA‑02014)
+        if ($query->getConnection()->isVersionAboveOrEqual('12c') && $query->lock === null) {
+            if ($query->limit !== null) {
+                $components['columns'] = str_replace('select', "select /*+ FIRST_ROWS({$query->limit}) */", $components['columns']);
+            }
+
+            $offset = $query->offset ?: 0;
+            $components['limit'] = "offset $offset rows";
+
+            if ($query->limit !== null) {
+                $components['limit'] .= " fetch next $query->limit rows only";
+            }
+
+            return $this->concatenate($components);
+        }
+
+        $constraint = $this->compileRowConstraint($query);
+
+        $sql = $this->concatenate($components);
+
+        // We are now ready to build the final SQL query so we'll create a common table
+        // expression from the query and get the records with row numbers within our
+        // given limit and offset value that we just put on as a query constraint.
+        return $this->compileTableExpression($sql, $constraint, $query);
+    }
+
+    /**
+     * Compile union query with limit/offset.
+     */
+    protected function compileUnionLimitOffset(Builder $query, string $sql): string
+    {
+        $limit = $query->unionLimit ?? null;
+        $offset = $query->unionOffset ?? 0;
+
+        if ($limit === null && $offset === 0) {
+            return $sql;
+        }
+
+        // For Oracle 12c and above, use OFFSET/FETCH
+        if ($query->getConnection()->isVersionAboveOrEqual('12c')) {
+            $sql .= " offset $offset rows";
+
+            if ($limit !== null) {
+                $sql .= " fetch next $limit rows only";
+            }
+
+            return $sql;
+        }
+
+        // For Oracle 11g and below, use ROW_NUMBER
+        $constraint = $this->compileUnionRowConstraint($limit, $offset);
+
+        // Special case for limit 1 with no offset - use simple rownum
+        if ($limit == 1 && $offset == 0) {
+            return "select * from ({$sql}) where rownum {$constraint}";
+        }
+
+        return 'select '.$this->compileTableExpressionColumns($query)." from ( select rownum AS \"rn\", t1.* from ({$sql}) t1 ) t2 where t2.\"rn\" {$constraint}";
+    }
+
+    /**
+     * Compile the limit / offset row constraint for a union query.
+     */
+    protected function compileUnionRowConstraint(?int $limit, int $offset): string
+    {
+        $start = $offset + 1;
+        $finish = $offset + $limit;
+
+        if ($limit == 1 && $offset == 0) {
+            return '= 1';
+        }
+
+        if ($offset && is_null($limit)) {
+            return ">= {$start}";
+        }
+
+        return "between {$start} and {$finish}";
+    }
+
+    /**
+     * Compile the limit / offset row constraint for a query.
+     */
+    protected function compileRowConstraint(Builder $query): string
+    {
+        $start = $query->offset + 1;
+        $finish = $query->offset + $query->limit;
+
+        if ($query->limit == 1 && is_null($query->offset)) {
+            return '= 1';
+        }
+
+        if ($query->offset && is_null($query->limit)) {
+            return ">= {$start}";
+        }
+
+        return "between {$start} and {$finish}";
+    }
+
+    /**
+     * Compile a common table expression for a query.
+     */
+    protected function compileTableExpression(string $sql, string $constraint, Builder $query): string
+    {
+        if ($query->limit == 1 && is_null($query->offset)) {
+            return "select * from ({$sql}) where rownum {$constraint}";
+        }
+
+        return 'select '.$this->compileTableExpressionColumns($query)." from ( select rownum AS \"rn\", t1.* from ({$sql}) t1 ) t2 where t2.\"rn\" {$constraint}";
+    }
+
+    /**
+     * Compile the outer projection for a row-number limited query.
+     * Heuristics to try to avoid ORA-01789.
+     */
+    protected function compileTableExpressionColumns(Builder $query): string
+    {
+        if (empty($query->columns) || in_array('*', $query->columns, true)) {
+            return 't2.*';
+        }
+
+        $columns = [];
+
+        foreach ($query->columns as $column) {
+            $value = $column instanceof Expression
+                ? $column->getValue($query->getGrammar())
+                : $column;
+
+            $value = trim((string) $value);
+
+            if ($value === 'rn' || preg_match('/\srn$/i', $value)) {
+                return 't2.*';
+            }
+
+            if ($value === '*' || str_contains($value, '*')) {
+                return 't2.*';
+            }
+
+            if (preg_match('/\s+as\s+(.+)$/i', $value, $matches)) {
+                $columns[] = 't2.'.$this->wrap($matches[1]);
+
+                continue;
+            }
+
+            if (str_contains($value, '(')) {
+                return 't2.*';
+            }
+
+            $columns[] = 't2.'.$this->wrap(last(explode('.', $value)));
+        }
+
+        return implode(', ', $columns);
+    }
+
+    /**
+     * Compile a truncate table statement into SQL.
+     */
+    public function compileTruncate(Builder $query): array
+    {
+        $cascade = static::$cascadeTruncate && $query->getConnection()->isVersionAboveOrEqual('12c')
+            ? ' cascade'
+            : '';
+
+        return ['truncate table '.$this->wrapTable($query->from).$cascade => []];
+    }
+
+    /**
+     * Enable or disable the "cascade" option when compiling the truncate statement.
+     */
+    public static function cascadeOnTruncate(bool $value = true): void
+    {
+        static::$cascadeTruncate = $value;
+    }
+
+    /**
+     * @deprecated use cascadeOnTruncate
+     */
+    public static function cascadeOnTrucate(bool $value = true): void
+    {
+        self::cascadeOnTruncate($value);
+    }
+
+    /**
+     * @param  string  $value
+     */
+    protected function wrapJsonSelector($value): string
+    {
+        [$field, $path] = $this->wrapJsonFieldAndPath($value);
+
+        return 'json_value('.$field.$path.')';
+    }
+
+    /**
+     * Wrap a table in keyword identifiers.
+     *
+     * @param  Expression|string  $table
+     */
+    public function wrapTable($table, $prefix = null): string
+    {
+        if ($this->isExpression($table)) {
+            return $this->getValue($table);
+        }
+
+        $prefix ??= $this->connection->getTablePrefix();
+
+        if (str_contains(strtolower($table), ' as ')) {
+            return $this->wrapAliasedTable($table, $prefix);
+        }
+
+        $tableName = $this->wrap($prefix.$table);
+        $segments = explode(' ', $table);
+        if (count($segments) > 1) {
+            $tableName = $this->wrap($prefix.$segments[0]).' '.$prefix.$segments[1];
+        }
+
+        if ($this->connection->getSchemaPrefix()) {
+            return $this->wrap($this->getSchemaPrefix()).'.'.$tableName;
+        }
+
+        return $tableName;
+    }
+
+    protected function wrapAliasedTable($value, $prefix = null): string
+    {
+        $segments = preg_split('/\s+as\s+/i', $value);
+
+        $prefix ??= $this->connection->getTablePrefix();
+
+        return $this->wrapTable($segments[0], $prefix).' '.$this->wrapValue($prefix.$segments[1]);
+    }
+
+    /**
+     * Return the schema prefix.
+     */
+    public function getSchemaPrefix(): string
+    {
+        return $this->connection->getSchemaPrefix();
+    }
+
+    /**
+     * Get max length.
+     */
+    public function getMaxLength(): int
+    {
+        return $this->connection->getMaxLength();
+    }
+
+    /**
+     * Compile an insert ignore statement into SQL.
+     */
+    public function compileInsertOrIgnore(Builder $query, array $values): string
+    {
+        $keys = array_keys(reset($values));
+        $columns = $this->columnize($keys);
+
+        $parameters = $this->compileUnionSelectFromDual($values);
+
+        $source = $this->wrapTable('laravel_source');
+
+        $sql = 'merge into '.$this->wrapTable($query->from).' ';
+        $sql .= 'using ('.$parameters.') '.$source;
+
+        $uniqueBy = $keys;
+        if (strtolower($query->from) == 'cache') {
+            $uniqueBy = ['key'];
+        }
+
+        $on = collect($uniqueBy)->map(fn ($column) => $this->wrap('laravel_source.'.$column).' = '.$this->wrap($query->from.'.'.$column))->implode(' and ');
+
+        $sql .= ' on ('.$on.') ';
+
+        $columnValues = collect(explode(', ', $columns))->map(fn ($column) => $source.'.'.$column)->implode(', ');
+
+        $sql .= 'when not matched then insert ('.$columns.') values ('.$columnValues.')';
+
+        return $sql;
+    }
+
+    /**
+     * Set the schema prefix.
+     */
+    public function setSchemaPrefix(string $prefix): void
+    {
+        $this->connection->setSchemaPrefix($prefix);
+    }
+
+    /**
+     * Set max length.
+     */
+    public function setMaxLength(int $length): void
+    {
+        $this->connection->setMaxLength($length);
+    }
+
+    /**
+     * Wrap a single string in keyword identifiers.
+     *
+     * @param  string  $value
+     */
+    protected function wrapValue($value): string
+    {
+        if ($value === '*') {
+            return $value;
+        }
+
+        $value = Str::upper($value);
+
+        return '"'.str_replace('"', '""', $value).'"';
+    }
+
+    /**
+     * Compile an insert and get ID statement into SQL.
+     *
+     * @param  array  $values
+     * @param  string  $sequence
+     */
+    public function compileInsertGetId(Builder $query, $values, $sequence = 'id'): string
+    {
+        if (empty($sequence)) {
+            $sequence = 'id';
+        }
+
+        $backtrace = debug_backtrace(DEBUG_BACKTRACE_PROVIDE_OBJECT, 4)[2]['object'];
+
+        if ($backtrace instanceof EloquentBuilder) {
+            $model = $backtrace->getModel();
+            if ($model->sequence && ! isset($values[$model->getKeyName()]) && $model->incrementing) {
+                $values[$sequence] = null;
+            }
+        }
+
+        if (empty($values)) {
+            $table = $this->wrapTable($query->from);
+
+            return 'insert into '.$table.' ('.$this->wrap($sequence).') values(DEFAULT) returning '.$this->wrap($sequence).' into ?';
+        }
+
+        return $this->compileInsert($query, $values).' returning '.$this->wrap($sequence).' into ?';
+    }
+
+    /**
+     * Compile an insert statement into SQL.
+     */
+    public function compileInsert(Builder $query, array $values): string
+    {
+        // Essentially we will force every insert to be treated as a batch insert which
+        // simply makes creating the SQL easier for us since we can utilize the same
+        // basic routine regardless of an amount of records given to us to insert.
+        $table = $this->wrapTable($query->from);
+
+        if (! is_array(reset($values))) {
+            $values = [$values];
+        }
+
+        $columns = $this->columnize(array_keys(reset($values)));
+
+        $rowTemplates = array_map(fn ($row) => '('.$this->parameterize($row).')', $values);
+
+        if (count($rowTemplates) === 1) {
+            return "insert into $table ($columns) values {$rowTemplates[0]}";
+        }
+
+        // Batch insert using Oracle-style "select ... from dual union all select ..."
+        $selects = [];
+        foreach ($values as $row) {
+            $parameters = implode(', ', array_map(fn ($v) => $this->parameter($v), $row));
+            $selects[] = 'select '.$parameters.' from dual';
+        }
+
+        $parameters = implode(' union all ', $selects);
+
+        return "insert into $table ($columns) $parameters";
+    }
+
+    /**
+     * Compile an insert with blob field statement into SQL.
+     */
+    public function compileInsertLob(Builder $query, array $values, array $binaries, string $sequence = 'id'): string
+    {
+        if (empty($sequence)) {
+            $sequence = 'id';
+        }
+
+        $table = $this->wrapTable($query->from);
+
+        if (! is_array(reset($values))) {
+            $values = [$values];
+        }
+
+        if (! is_array(reset($binaries))) {
+            $binaries = [$binaries];
+        }
+
+        $columns = $this->columnize(array_keys(reset($values)));
+        $binaryColumns = $this->columnize(array_keys(reset($binaries)));
+        $columns .= (empty($columns) ? '' : ', ').$binaryColumns;
+
+        $parameters = $this->parameterize(reset($values));
+        $binaryParameters = $this->parameterize(reset($binaries));
+
+        $value = array_fill(0, count($values), "$parameters");
+        $binaryValue = array_fill(0, count($binaries), str_replace('?', 'EMPTY_BLOB()', $binaryParameters));
+
+        $value = array_merge($value, $binaryValue);
+        $parameters = implode(', ', array_filter($value));
+
+        return "insert into $table ($columns) values ($parameters) returning ".$binaryColumns.', '.$this->wrap($sequence).' into '.$binaryParameters.', ?';
+    }
+
+    /**
+     * Compile an update statement into SQL.
+     */
+    public function compileUpdateLob(Builder $query, array $values, array $binaries, string $sequence = 'id'): string
+    {
+        $table = $this->wrapTable($query->from);
+
+        // Each one of the columns in the update statements needs to be wrapped in the
+        // keyword identifiers, also a place-holder needs to be created for each of
+        // the values in the list of bindings so we can make the sets statements.
+        $columns = [];
+
+        foreach ($values as $key => $value) {
+            $columns[] = $this->wrap($key).' = '.$this->parameter($value);
+        }
+
+        $columns = implode(', ', $columns);
+
+        // set blob variables
+        if (! is_array(reset($binaries))) {
+            $binaries = [$binaries];
+        }
+        $binaryColumns = $this->columnize(array_keys(reset($binaries)));
+        $binaryParameters = $this->parameterize(reset($binaries));
+
+        // create EMPTY_BLOB sql for each binary
+        $binarySql = [];
+        foreach (explode(',', $binaryColumns) as $binary) {
+            $binarySql[] = "$binary = EMPTY_BLOB()";
+        }
+
+        // prepare binary SQLs
+        if (count($binarySql)) {
+            $binarySql = (empty($columns) ? '' : ', ').implode(',', $binarySql);
+        }
+
+        // If the query has any "join" clauses, we will setup the joins on the builder
+        // and compile them so we can attach them to this update, as update queries
+        // can get join statements to attach to other tables when they're needed.
+        $joins = '';
+        if (isset($query->joins)) {
+            $joins = ' '.$this->compileJoins($query, $query->joins);
+        }
+
+        // Of course, update queries may also be constrained by where clauses so we'll
+        // need to compile the where clauses and attach it to the query so only the
+        // intended records are updated by the SQL statements we generate to run.
+        $where = $this->compileWheres($query);
+
+        return "update {$table}{$joins} set $columns$binarySql $where returning ".$binaryColumns.', '.$this->wrap($sequence).' into '.$binaryParameters.', ?';
+    }
+
+    /**
+     * Compile the columns for an update statement.
+     */
+    protected function compileUpdateColumns(Builder $query, array $values): string
+    {
+        return collect($values)->map(function ($value, $key) use ($query) {
+            $column = last(explode('.', $key));
+
+            if ($this->isJsonSelector($column)) {
+                return $this->compileJsonUpdateColumn($query, $column, $value);
+            }
+
+            return $this->wrap($column).' = '.$this->parameter($value);
+        })->implode(', ');
+    }
+
+    /**
+     * Compile a JSON column update using Oracle's JSON_TRANSFORM function.
+     */
+    protected function compileJsonUpdateColumn(Builder $query, string $key, mixed $value): string
+    {
+        if (! $query->getConnection()->isVersionAboveOrEqual('19c')) {
+            throw new RuntimeException('JSON path updates require Oracle 19c or newer.');
+        }
+
+        [$field, $path] = $this->wrapJsonFieldAndPath($key);
+        $path = substr($path, 2);
+
+        $formatJson = $this->shouldFormatJsonUpdateValue($value) ? ' FORMAT JSON' : '';
+
+        return "{$field} = json_transform({$field}, SET {$path} = {$this->parameter($value)}{$formatJson})";
+    }
+
+    /**
+     * Prepare the bindings for an update statement.
+     */
+    public function prepareBindingsForUpdate(array $bindings, array $values): array
+    {
+        $values = collect($values)
+            ->map(fn ($value, $column) => $this->isJsonSelector($column) && $this->shouldFormatJsonUpdateValue($value)
+                ? json_encode($value)
+                : $value)
+            ->all();
+
+        return parent::prepareBindingsForUpdate($bindings, $values);
+    }
+
+    /**
+     * Determine if an updated JSON value should be passed as JSON text.
+     */
+    protected function shouldFormatJsonUpdateValue(mixed $value): bool
+    {
+        return is_bool($value)
+            || is_int($value)
+            || is_float($value)
+            || is_null($value)
+            || is_array($value)
+            || $value instanceof JsonSerializable
+            || $value instanceof stdClass;
+    }
+
+    /**
+     * Compile an update from statement into SQL.
+     */
+    public function compileUpdateFrom(Builder $query, $values): string
+    {
+        if (! isset($query->joins)) {
+            return $this->compileUpdate($query, $values);
+        }
+
+        $target = $this->wrapTable($query->from);
+        $targetReference = $this->getUpdateFromTargetReference($query);
+        $sourceColumns = [];
+        $assignments = [];
+        $source = $this->wrapTable('laravel_source');
+
+        foreach ($values as $column => $value) {
+            $sourceAlias = $this->wrap('laravel_source_'.Str::lower($column));
+
+            $sourceColumns[] = $this->parameter($value).' as '.$sourceAlias;
+            $assignments[] = $this->wrap($column).' = '.$this->wrap('laravel_source.laravel_source_'.Str::lower($column));
+        }
+
+        $sourceTables = array_merge([$target], array_map(
+            fn ($join) => $this->wrapTable($join->table),
+            $this->reorderJoins($query->joins)
+        ));
+        $where = $this->compileUpdateFromWheres($query);
+        $rowIdAlias = $this->wrap('laravel_rowid');
+        $selects = implode(', ', array_merge([$targetReference.'.rowid as '.$rowIdAlias], $sourceColumns));
+        $from = implode(', ', $sourceTables);
+        $set = implode(', ', $assignments);
+        $on = $source.'.'.$rowIdAlias.' = '.$targetReference.'.rowid';
+
+        return trim("merge into {$target} using (select {$selects} from {$from} {$where}) {$source} on ({$on}) when matched then update set {$set}");
+    }
+
+    /**
+     * Prepare the bindings for an update from statement.
+     */
+    public function prepareBindingsForUpdateFrom(array $bindings, array $values): array
+    {
+        $values = Arr::flatten(array_map(fn ($value) => value($value), $values));
+        $cleanBindings = Arr::except($bindings, ['select', 'where']);
+
+        return array_values(array_merge($values, $bindings['where'], Arr::flatten($cleanBindings)));
+    }
+
+    /**
+     * Compile the lock into SQL.
+     *
+     * @param  bool|string  $value
+     */
+    protected function compileLock(Builder $query, $value): string
+    {
+        if (is_string($value)) {
+            return $value;
+        }
+
+        if (is_bool($value)) {
+            return 'for update';
+        }
+
+        return '';
+    }
+
+    /**
+     * Compile the "limit" portions of the query.
+     *
+     * @param  int  $limit
+     */
+    protected function compileLimit(Builder $query, $limit): string
+    {
+        return '';
+    }
+
+    /**
+     * Compile the "offset" portions of the query.
+     *
+     * @param  int  $offset
+     */
+    protected function compileOffset(Builder $query, $offset): string
+    {
+        return '';
+    }
+
+    /**
+     * Compile the where clause for an update from statement.
+     */
+    protected function compileUpdateFromWheres(Builder $query): string
+    {
+        $baseWheres = $this->compileWheres($query);
+        $joinWheres = $this->compileUpdateJoinWheres($query);
+
+        if ($baseWheres === '') {
+            return $joinWheres === '' ? '' : 'where '.$this->removeLeadingBoolean($joinWheres);
+        }
+
+        return $joinWheres === '' ? $baseWheres : $baseWheres.' '.$joinWheres;
+    }
+
+    /**
+     * Compile join constraints for an update from statement.
+     */
+    protected function compileUpdateJoinWheres(Builder $query): string
+    {
+        $joinWheres = [];
+
+        foreach ($this->reorderJoins($query->joins) as $join) {
+            foreach ($join->wheres as $where) {
+                $method = 'where'.$where['type'];
+                $joinWheres[] = $where['boolean'].' '.$this->$method($query, $where);
+            }
+        }
+
+        return implode(' ', $joinWheres);
+    }
+
+    /**
+     * Get the target table reference used in update from queries.
+     */
+    protected function getUpdateFromTargetReference(Builder $query): string
+    {
+        $table = preg_replace('/\s+/', ' ', trim($query->from));
+
+        if (preg_match('/\s+("?)([A-Za-z_][A-Za-z0-9_]*)\1$/', $table, $matches)) {
+            return $matches[2];
+        }
+
+        $parts = explode('.', $table);
+
+        return trim((string) end($parts), '"');
+    }
+
+    /**
+     * Compile a "where date" clause.
+     *
+     * @param  array  $where
+     */
+    protected function whereDate(Builder $query, $where): string
+    {
+        $value = $this->parameter($where['value']);
+
+        // Raw expressions are passed through as-is.
+        if ($where['value'] instanceof Expression) {
+            return "trunc({$this->wrap($where['column'])}) {$where['operator']} $value";
+        }
+
+        // Laravel's Builder::whereDate() normalises any DateTimeInterface to a 'Y-m-d'
+        // string before the grammar is called, so the value is always a date-only string.
+        // TRUNC strips the time from the column; TO_DATE with 'YYYY-MM-DD' parses the
+        // date-only string and yields midnight, so no TRUNC is needed on the RHS.
+        return "trunc({$this->wrap($where['column'])}) {$where['operator']} to_date($value, 'YYYY-MM-DD')";
+    }
+
+    /**
+     * Compile a "where time" clause.
+     *
+     * Oracle does not support EXTRACT(TIME FROM ...), so we use TO_CHAR instead.
+     * The format mask is matched to the precision of the supplied value so that
+     * both equality and range comparisons work correctly:
+     *
+     *   '22:00'    → TO_CHAR(column, 'HH24:MI')
+     *   '22:00:00' → TO_CHAR(column, 'HH24:MI:SS')
+     */
+    protected function whereTime(Builder $query, $where): string
+    {
+        $value = $this->parameter($where['value']);
+
+        // If the value is a raw expression, default to full precision.
+        if ($where['value'] instanceof Expression) {
+            return "TO_CHAR({$this->wrap($where['column'])}, 'HH24:MI:SS') {$where['operator']} $value";
+        }
+
+        $rawValue = $where['value'];
+
+        // Match the TO_CHAR format mask to the precision of the supplied value so
+        // that both equality and range comparisons are correct.
+        // A value with seconds (e.g. '22:00:00') uses HH24:MI:SS;
+        // a value without seconds (e.g. '22:00') uses HH24:MI.
+        $hasSeconds = is_string($rawValue) && preg_match('/^\d{2}:\d{2}:\d{2}/', $rawValue);
+
+        $format = $hasSeconds ? 'HH24:MI:SS' : 'HH24:MI';
+
+        return "TO_CHAR({$this->wrap($where['column'])}, '$format') {$where['operator']} $value";
+    }
+
+    /**
+     * Compile a date based where clause.
+     *
+     * @param  string  $type
+     * @param  array  $where
+     */
+    protected function dateBasedWhere($type, Builder $query, $where): string
+    {
+        $value = $this->parameter($where['value']);
+
+        return "extract ($type from {$this->wrap($where['column'])}) {$where['operator']} $value";
+    }
+
+    /**
+     * Compile a "where null safe equals" clause.
+     *
+     * Oracle's DECODE treats two NULL values as equal, matching Laravel's
+     * null-safe equality semantics without requiring duplicate bindings.
+     *
+     * @param  array  $where
+     */
+    protected function whereNullSafeEquals(Builder $query, $where): string
+    {
+        return 'DECODE('.$this->wrap($where['column']).', '.$this->parameter($where['value']).', 1, 0) = 1';
+    }
+
+    /**
+     * Compile a "where not in raw" clause.
+     *
+     * For safety, whereIntegerInRaw ensures this method is only used with integer values.
+     *
+     * @param  array  $where
+     */
+    protected function whereNotInRaw(Builder $query, $where): string
+    {
+        if (! empty($where['values'])) {
+            if (is_array($where['values']) && count($where['values']) > 1000) {
+                return $this->resolveClause($where['column'], $where['values'], 'not in');
+            } else {
+                return $this->wrap($where['column']).' not in ('.implode(', ', $where['values']).')';
+            }
+        }
+
+        return '1 = 1';
+    }
+
+    /**
+     * Compile a "where in raw" clause.
+     *
+     * For safety, whereIntegerInRaw ensures this method is only used with integer values.
+     *
+     * @param  array  $where
+     */
+    protected function whereInRaw(Builder $query, $where): string
+    {
+        if (! empty($where['values'])) {
+            if (is_array($where['values']) && count($where['values']) > 1000) {
+                return $this->resolveClause($where['column'], $where['values'], 'in');
+            } else {
+                return $this->wrap($where['column']).' in ('.implode(', ', $where['values']).')';
+            }
+        }
+
+        return '0 = 1';
+    }
+
+    /**
+     * Compile a "where fulltext" clause.
+     *
+     * @param  array  $where
+     * @return string
+     */
+    public function whereFullText(Builder $query, $where)
+    {
+        // Build the fullText clause
+        $fullTextClause = collect($where['columns'])
+            ->map(function ($column, $index) use ($where) {
+                $labelSearchFullText = $index > 0 ? ++$this->labelSearchFullText : $this->labelSearchFullText;
+
+                return "CONTAINS({$this->wrap($column)}, {$this->parameter($where['value'])}, {$labelSearchFullText}) > 0";
+            })
+            ->implode(" {$where['boolean']} ");
+
+        // Count the total number of columns in the clauses
+        $fullTextClauseCount = array_reduce($query->wheres, fn ($count, $queryWhere) => $queryWhere['type'] === 'Fulltext' ? $count + count($queryWhere['columns']) : $count, 0);
+
+        // Reset the counter if all columns were used in the clause
+        if ($fullTextClauseCount === $this->labelSearchFullText) {
+            $this->labelSearchFullText = 0;
+        }
+
+        // Increment the counter for the next clause
+        $this->labelSearchFullText++;
+
+        return $fullTextClause;
+    }
+
+    private function resolveClause($column, $values, $type): string
+    {
+        $chunks = array_chunk($values, 1000);
+        $boolean = $type === 'not in' ? ' and ' : ' or ';
+        $type = $this->wrap($column).' '.$type;
+
+        $whereClause = collect($chunks)
+            ->map(fn ($ch) => $type.' ('.implode(', ', $ch).')')
+            ->implode($boolean);
+
+        return '('.$whereClause.')';
+    }
+
+    /**
+     * Compile a union aggregate query into SQL.
+     */
+    protected function compileUnionAggregate(Builder $query): string
+    {
+        $sql = $this->compileAggregate($query, $query->aggregate);
+
+        $query->aggregate = null;
+
+        return $sql.' from ('.$this->compileSelect($query).') '.$this->wrapTable('temp_table');
+    }
+
+    /**
+     * Compile the random statement into SQL.
+     *
+     * @param  string  $seed
+     */
+    public function compileRandom($seed): string
+    {
+        return 'DBMS_RANDOM.RANDOM';
+    }
+
+    /**
+     * Compile a query to get the number of open connections for the database.
+     */
+    public function compileThreadCount(): string
+    {
+        return 'select count(*) as "Value" from v$session';
+    }
+
+    /**
+     * Compile an "upsert" statement into SQL.
+     */
+    public function compileUpsert(Builder $query, array $values, array $uniqueBy, array $update): string
+    {
+        $columns = $this->columnize(array_keys(reset($values)));
+        $parameters = $this->compileUnionSelectFromDual($values);
+
+        $source = $this->wrapTable('laravel_source');
+
+        $sql = 'merge into '.$this->wrapTable($query->from).' ';
+        $sql .= 'using ('.$parameters.') '.$source;
+
+        $on = collect($uniqueBy)->map(fn ($column) => $this->wrap('laravel_source.'.$column).' = '.$this->wrap($query->from.'.'.$column))->implode(' and ');
+
+        $sql .= ' on ('.$on.') ';
+
+        if ($update) {
+            $update = collect($update)
+                ->reject(fn ($value, $key) => in_array($value, $uniqueBy))
+                ->map(fn ($value, $key) => is_numeric($key)
+                    ? $this->wrap($value).' = '.$this->wrap('laravel_source.'.$value)
+                    : $this->wrap($key).' = '.$this->parameter($value))
+                ->implode(', ');
+
+            $sql .= 'when matched then update set '.$update.' ';
+        }
+
+        $columnValues = collect(explode(', ', $columns))->map(fn ($column) => $source.'.'.$column)->implode(', ');
+
+        $sql .= 'when not matched then insert ('.$columns.') values ('.$columnValues.')';
+
+        return $sql;
+    }
+
+    /**
+     * Compile the SQL statement to execute a savepoint rollback.
+     *
+     * @param  string  $name
+     */
+    public function compileSavepointRollBack($name): string
+    {
+        return 'ROLLBACK TO '.$name;
+    }
+
+    protected function compileUnionSelectFromDual(array $values): string
+    {
+        return collect($values)->map(function ($record) {
+            $values = collect($record)->map(fn ($value, $key) => '? as '.$this->wrap($key))->implode(', ');
+
+            return 'select '.$values.' from dual';
+        })->implode(' union all ');
+    }
+
+    /**
+     * Compile a "where like" clause.
+     *
+     * @param  array  $where
+     */
+    protected function whereLike(Builder $query, $where): string
+    {
+        $where['operator'] = $where['not'] ? 'not like' : 'like';
+
+        if ($where['caseSensitive']) {
+            return $this->whereBasic($query, $where);
+        }
+
+        $value = $this->parameter($where['value']);
+
+        $operator = str_replace('?', '??', $where['operator']);
+
+        if ($query->getConnection()->isVersionAboveOrEqual('12cR2')) {
+            return $this->wrap($where['column']).' '.$operator.' '.$value.' COLLATE BINARY_CI';
+        }
+
+        return 'upper('.$this->wrap($where['column']).') '.$operator.' upper('.$value.')';
+    }
+
+    /**
+     * Compile a "where JSON contains" clause.
+     *
+     * @param  array  $where
+     */
+    protected function whereJsonContains(Builder $query, $where): string
+    {
+        $not = $where['not'] ? 'NOT ' : '';
+
+        return $not.$this->compileJsonContains(
+            $where['column'],
+            is_array($where['value']) ? $this->parameterize($where['value']) : $this->parameter($where['value']),
+            is_array($where['value']) ? count($where['value']) : 1
+        );
+    }
+
+    /**
+     * Compile a "JSON contains" statement into SQL.
+     *
+     * @param  string  $column
+     * @param  string  $value
+     * @param  int  $count  = 1
+     *
+     * @throws RuntimeException
+     */
+    protected function compileJsonContains($column, $value, int $count = 1): string
+    {
+        $parts = explode('->', $column, 2);
+        $field = $this->wrap($parts[0]);
+
+        if (count($parts) > 1) {
+            $jsonPath = '$.'.str_replace('->', '.', $parts[1]).'[*]';
+        } else {
+            $jsonPath = '$[*]';
+        }
+
+        $sql = 'EXISTS (SELECT 1 FROM JSON_TABLE('.$field.', \''.$jsonPath.'\' COLUMNS (value VARCHAR2(4000) PATH \'$\')) jt WHERE jt.value';
+
+        if ($count === 1) {
+            return $sql.'='.$value.')';
+        }
+
+        return $sql.' IN ('.$value.') HAVING COUNT(DISTINCT jt.value) = '.$count.')';
+    }
+
+    /**
+     * Prepare the binding for a "JSON contains" statement.
+     *
+     * @param  mixed  $binding
+     */
+    public function prepareBindingForJsonContains($binding): mixed
+    {
+        return $binding;
+    }
+
+    /**
+     * Compile a "JSON contains key" statement into SQL.
+     *
+     * @param  string  $column
+     */
+    protected function compileJsonContainsKey($column): string
+    {
+        [$field, $path] = $this->wrapJsonFieldAndPath($column);
+
+        return 'json_exists('.$field.$path.')';
+    }
+
+    /**
+     * Wrap the given JSON boolean value.
+     *
+     * @param  string  $value
+     */
+    protected function wrapJsonBooleanValue($value): string
+    {
+        return "'".strtolower($value)."'";
+    }
+
+    protected function compileJsonLength($column, $operator, $value)
+    {
+        [$field, $path] = $this->wrapJsonFieldAndPath($column);
+
+        $jsonPath = $path ?: '$[*]';
+
+        return '(SELECT COUNT(*) FROM JSON_TABLE('.$field.', \''.$jsonPath.'\' COLUMNS (val PATH \'$\')) ) '.$operator.' '.$value;
+    }
+
+    /**
+     * Compile the "join" portions of the query.
+     *
+     * @param  array  $joins
+     * @return string
+     */
+    protected function compileJoins(Builder $query, $joins)
+    {
+        return parent::compileJoins($query, $this->reorderJoins($joins));
+    }
+
+    /**
+     * Compile a "lateral join" clause.
+     */
+    public function compileJoinLateral(JoinLateralClause $join, string $expression): string
+    {
+        if (! $this->connection->isVersionAboveOrEqual('12c')) {
+            throw new RuntimeException('Lateral joins are only supported by Oracle 12c and newer.');
+        }
+
+        return trim("{$join->type} join lateral {$expression} on 1 = 1");
+    }
+
+    /**
+     * Reorder joins only when needed:
+     * - If current order already satisfies dependencies, return as-is.
+     * - Otherwise, perform a stable dependency-aware topological sort.
+     */
+    protected function reorderJoins(array $joins): array
+    {
+        $n = count($joins);
+        if ($n <= 1) {
+            return $joins;
+        }
+
+        // 1) Determine what alias/table each join introduces
+        // index => alias (string|null)
+        $introduced = array_map(function ($join) {
+            return strtolower($this->extractJoinAlias($join));
+        }, $joins);
+
+        // alias -> index (first match wins)
+        $aliasToIndex = [];
+        foreach ($introduced as $i => $alias) {
+            if ($alias !== null && ! isset($aliasToIndex[$alias])) {
+                $aliasToIndex[$alias] = $i;
+            }
+        }
+
+        $referencedAliasesByJoin = [];
+        foreach ($joins as $i => $join) {
+            $refs = [];
+
+            foreach (($join->wheres) as $where) {
+                if (is_string($where['first'] ?? null)) {
+                    $parts = explode('.', str_replace('"', '', $where['first']), 2);
+                    if (count($parts) >= 2) {
+                        $prefix = trim($parts[0]);
+                        if ($prefix !== '') {
+                            $refs[] = $prefix;
+                        }
+                    }
+                }
+
+                if (is_string($where['second'] ?? null)) {
+                    $parts = explode('.', str_replace('"', '', $where['second']), 2);
+                    if (count($parts) >= 2) {
+                        $prefix = trim($parts[0]);
+                        if ($prefix !== '') {
+                            $refs[] = $prefix;
+                        }
+                    }
+                }
+            }
+
+            $referencedAliasesByJoin[$i] = array_values(array_unique($refs));
+        }
+
+        // 2) Detect if reordering is needed at all:
+        //    if any join references an alias introduced by a later join, order is invalid.
+        $needsReorder = false;
+        foreach ($joins as $i => $join) {
+            foreach ($referencedAliasesByJoin[$i] as $alias) {
+                if (isset($aliasToIndex[$alias]) && $aliasToIndex[$alias] > $i) {
+                    $needsReorder = true;
+                    break 2;
+                }
+            }
+        }
+
+        if (! $needsReorder) {
+            return $joins;
+        }
+
+        // 3) Build dependency edges: j -> i if i references alias introduced by j
+        $outEdges = array_fill(0, $n, []);
+        $inDeg = array_fill(0, $n, 0);
+
+        foreach ($joins as $i => $join) {
+            foreach ($referencedAliasesByJoin[$i] as $alias) {
+                if (! isset($aliasToIndex[$alias])) {
+                    continue;
+                }
+                $j = $aliasToIndex[$alias];
+                if ($j === $i) {
+                    continue;
+                }
+                if (! in_array($i, $outEdges[$j], true)) {
+                    $outEdges[$j][] = $i;
+                    $inDeg[$i]++;
+                }
+            }
+        }
+
+        // 4) Stable Kahn topo sort (tie-break strictly by original index)
+        $available = [];
+        for ($i = 0; $i < $n; $i++) {
+            if ($inDeg[$i] === 0) {
+                $available[] = $i;
+            }
+        }
+
+        $sortedIdx = [];
+        while (! empty($available)) {
+            sort($available);           // stable: smallest original index first
+            $u = array_shift($available);
+
+            $sortedIdx[] = $u;
+
+            foreach ($outEdges[$u] as $v) {
+                $inDeg[$v]--;
+                if ($inDeg[$v] === 0) {
+                    $available[] = $v;
+                }
+            }
+        }
+
+        // If cycle/unresolvable, safest is keep original
+        if (count($sortedIdx) !== $n) {
+            return $joins;
+        }
+
+        $out = [];
+        foreach ($sortedIdx as $i) {
+            $out[] = $joins[$i];
+        }
+
+        return $out;
+    }
+
+    /**
+     * Extract the alias/name a join introduces.
+     */
+    protected function extractJoinAlias($join): ?string
+    {
+        if ($join->table instanceof Expression) {
+            $sql = (string) $join->table->getValue($this);
+            // "(select ...) alias"  or  "(select ...) "ALIAS"
+            if (preg_match('/\)\s+("?)([A-Za-z_][A-Za-z0-9_]*)\1\s*$/', $sql, $m)) {
+                return $m[2];
+            }
+
+            return null;
+        }
+
+        $table = preg_replace('/\s+/', ' ', trim((string) $join->table));
+
+        // Oracle table aliases are "table alias"
+        if (str_contains($table, ' ') && preg_match('/\s+"?([A-Za-z_][A-Za-z0-9_]*)"?$/', $table, $m)) {
+            return $m[1];
+        }
+
+        $parts = explode('.', $table);
+
+        return trim((string) end($parts), '"');
+    }
+}

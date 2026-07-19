@@ -1,0 +1,368 @@
+<?php
+
+namespace Yajra\Oci8\Query\Processors;
+
+use DateTime;
+use Illuminate\Database\Eloquent\Builder as EloquentBuilder;
+use Illuminate\Database\Eloquent\Model;
+use Illuminate\Database\Query\Builder;
+use Illuminate\Database\Query\Expression;
+use Illuminate\Database\Query\Processors\Processor;
+use Illuminate\Database\QueryException;
+use Illuminate\Database\UniqueConstraintViolationException;
+use PDO;
+use PDOStatement;
+use Throwable;
+use Yajra\Oci8\Oci8Connection;
+
+class OracleProcessor extends Processor
+{
+    /**
+     * Process an "insert get ID" query.
+     *
+     * @param  string  $sql
+     * @param  array  $values
+     * @param  null|string  $sequence
+     */
+    public function processInsertGetId(Builder $query, $sql, $values, $sequence = null): int
+    {
+        $connection = $query->getConnection();
+
+        $connection->recordsHaveBeenModified();
+        $start = microtime(true);
+
+        $id = 0;
+        $parameter = 1;
+        $statement = $this->prepareStatement($query, $sql);
+        $values = $this->incrementBySequence($values, $sequence);
+        $parameter = $this->bindValues($query, $values, $statement, $parameter);
+        $statement->bindParam($parameter, $id, PDO::PARAM_INT, -1);
+
+        try {
+            $statement->execute();
+        } catch (Throwable $e) {
+            if (preg_match('/ORA-00001:/i', $e->getMessage())) {
+                throw new UniqueConstraintViolationException(
+                    $connection->getName(),
+                    $sql,
+                    $connection->prepareBindings($values),
+                    $e
+                );
+            }
+
+            throw new QueryException($connection->getName(), $sql, $connection->prepareBindings($values), $e);
+        }
+
+        $connection->logQuery($sql, $values, $this->getElapsedTime($start));
+
+        return $id;
+    }
+
+    /**
+     * Get prepared statement.
+     */
+    private function prepareStatement(Builder $query, string $sql): PDOStatement|false
+    {
+        /** @var Oci8Connection $connection */
+        $connection = $query->getConnection();
+        $pdo = $connection->getPdo();
+
+        return $pdo->prepare($sql);
+    }
+
+    /**
+     * Insert a new record and get the value of the primary key.
+     */
+    protected function incrementBySequence(array $values, ?string $sequence = null): array
+    {
+        $builder = debug_backtrace(DEBUG_BACKTRACE_PROVIDE_OBJECT, 5)[3]['object'];
+        $builderArgs = debug_backtrace(DEBUG_BACKTRACE_PROVIDE_OBJECT, 5)[2]['args'];
+
+        if (! isset($builderArgs[1][0][$sequence])) {
+            if ($builder instanceof EloquentBuilder) {
+                /** @var Model $model */
+                $model = $builder->getModel();
+
+                /** @var Oci8Connection $connection */
+                $connection = $model->getConnection();
+                if (isset($model->sequence) && $model->incrementing) {
+                    $values[] = $connection->getSequence()->nextValue($model->sequence);
+                }
+            }
+        }
+
+        return $values;
+    }
+
+    /**
+     * Bind values to PDO statement.
+     */
+    private function bindValues(Builder $query, array &$values, PDOStatement $statement, int $parameter): int
+    {
+        $count = count($values);
+        for ($i = 0; $i < $count; $i++) {
+            if (is_object($values[$i])) {
+                if ($values[$i] instanceof DateTime) {
+                    $values[$i] = $values[$i]->format($query->grammar->getDateFormat());
+                } else {
+                    $values[$i] = (string) $values[$i];
+                }
+            }
+            $type = $this->getPdoType($values[$i]);
+            $statement->bindParam($parameter, $values[$i], $type);
+            $parameter++;
+        }
+
+        return $parameter;
+    }
+
+    /**
+     * Get the elapsed time since a given starting point.
+     *
+     * @param  int  $start
+     * @return float
+     */
+    protected function getElapsedTime($start)
+    {
+        return round((microtime(true) - $start) * 1000, 2);
+    }
+
+    /**
+     * Get PDO Type depending on value.
+     */
+    private function getPdoType(mixed $value): int
+    {
+        if (is_int($value)) {
+            return PDO::PARAM_INT;
+        }
+
+        if (is_bool($value)) {
+            return PDO::PARAM_BOOL;
+        }
+
+        if (is_null($value)) {
+            return PDO::PARAM_NULL;
+        }
+
+        return PDO::PARAM_STR;
+    }
+
+    /**
+     * Save Query with Blob returning primary key value.
+     */
+    public function saveLob(Builder $query, string $sql, array $values, array $binaries): int
+    {
+        $connection = $query->getConnection();
+
+        $connection->recordsHaveBeenModified();
+        $start = microtime(true);
+
+        $id = 0;
+        $parameter = 1;
+        $statement = $this->prepareStatement($query, $sql);
+
+        $parameter = $this->bindValues($query, $values, $statement, $parameter);
+
+        $countBinary = count($binaries);
+        for ($i = 0; $i < $countBinary; $i++) {
+            $statement->bindParam($parameter, $binaries[$i], PDO::PARAM_LOB, -1);
+            $parameter++;
+        }
+
+        // bind output param for the returning clause.
+        $statement->bindParam($parameter, $id, PDO::PARAM_INT, -1);
+
+        if (! $statement->execute()) {
+            return 0;
+        }
+
+        $connection->logQuery($sql, $values, $this->getElapsedTime($start));
+
+        return $id;
+    }
+
+    /**
+     * Process the results of a column listing query.
+     */
+    public function processColumnListing(array $results): array
+    {
+        $mapping = function ($r) {
+            $r = (object) $r;
+
+            return strtolower((string) $r->column_name);
+        };
+
+        return array_map($mapping, $results);
+    }
+
+    /**
+     * Process the results of a columns query.
+     *
+     * @param  array  $results
+     */
+    public function processColumns($results): array
+    {
+        return array_map(function ($result) {
+            $result = (object) $result;
+
+            $type = strtolower((string) $result->type);
+            $precision = (int) $result->precision;
+            $places = (int) $result->places;
+            $length = (int) $result->data_length;
+
+            switch ($typeName = strtolower((string) $result->type_name)) {
+                case 'number':
+                    if ($precision === 19 && $places === 0) {
+                        $type = 'bigint';
+                    } elseif ($precision === 10 && $places === 0) {
+                        $type = 'int';
+                    } elseif ($precision === 5 && $places === 0) {
+                        $type = 'smallint';
+                    } elseif ($precision === 1 && $places === 0) {
+                        $type = 'boolean';
+                    } elseif ($places > 0) {
+                        $type = 'decimal';
+                    }
+
+                    break;
+
+                case 'varchar':
+                case 'varchar2':
+                case 'nvarchar2':
+                case 'char':
+                case 'nchar':
+                    $length = (int) $result->char_length;
+                    break;
+                default:
+                    $type = $typeName;
+            }
+
+            return [
+                'name' => strtolower((string) $result->name),
+                'type_name' => strtolower((string) $result->type_name),
+                'type' => $type,
+                'collation' => $result->collation ? strtolower((string) $result->collation) : null,
+                'nullable' => (bool) $result->nullable,
+                'default' => $result->generated ? null : $result->default,
+                'auto_increment' => (bool) $result->auto_increment,
+                'comment' => $result->comment != '' ? $result->comment : null,
+                'generation' => $result->generated ? [
+                    'type' => strtolower((string) $result->generated),
+                    'expression' => $result->default,
+                ] : null,
+                'length' => $length,
+                'precision' => $precision,
+            ];
+        }, $results);
+    }
+
+    /**
+     * Process the results of a types query.
+     *
+     * @param  array  $results
+     */
+    public function processTypes($results): array
+    {
+        return array_map(function ($result) {
+            $result = (object) $result;
+
+            return [
+                'name' => strtolower((string) $result->name),
+                'schema' => strtolower((string) $result->schema),
+                'schema_qualified_name' => strtolower((string) $result->schema).'.'.strtolower((string) $result->name),
+                'type' => strtolower((string) $result->type),
+                'category' => strtolower((string) $result->category),
+                'implicit' => (bool) $result->implicit,
+            ];
+        }, $results);
+    }
+
+    /**
+     * Process the results of a columns query.
+     *
+     * @param  array  $results
+     */
+    public function processForeignKeys($results): array
+    {
+        return array_map(function ($result) {
+            $result = (object) $result;
+
+            return [
+                'name' => strtolower((string) $result->name),
+                'columns' => explode(',', strtolower((string) $result->columns)),
+                'foreign_schema' => strtolower((string) $result->foreign_schema),
+                'foreign_table' => strtolower((string) $result->foreign_table),
+                'foreign_columns' => explode(',', strtolower((string) $result->foreign_columns)),
+                'on_update' => strtolower((string) $result->on_update),
+                'on_delete' => $result->on_delete,
+            ];
+        }, $results);
+    }
+
+    /**
+     * Process the results of an indexes query.
+     *
+     * @param  array  $results
+     */
+    public function processIndexes($results): array
+    {
+        return array_map(function ($result) {
+            $result = (object) $result;
+
+            return [
+                'name' => strtolower((string) $result->name),
+                'columns' => array_map(
+                    fn ($column) => strtolower(trim((string) $column)),
+                    array_filter(explode(',', (string) $result->columns), fn ($value) => $value !== '')
+                ),
+                'type' => strtolower((string) $result->type),
+                'unique' => (bool) $result->unique,
+                'primary' => (bool) $result->primary,
+            ];
+        }, $results);
+    }
+
+    /**
+     * Process the results of a "select" query.
+     *
+     * @param  array  $results
+     * @return array
+     */
+    public function processSelect(Builder $query, $results)
+    {
+        /** @var Oci8Connection $connection */
+        $connection = $query->getConnection();
+
+        if (method_exists($connection, 'isVersionBelow') && $connection->isVersionBelow('12c') && (isset($query->limit) || isset($query->offset)) && ! $this->rnColumnSelected($query) && is_array($results)) {
+            return array_map(function ($row) {
+                if (is_object($row) && isset($row->rn)) {
+                    unset($row->rn);
+                }
+
+                return $row;
+            }, $results);
+        }
+
+        return $results;
+    }
+
+    /**
+     * Check if the rn column is selected.
+     */
+    private function rnColumnSelected(Builder $query): bool
+    {
+        foreach (($query->columns ?? []) as $column) {
+            $value = $column instanceof Expression
+                ? $column->getValue($query->getGrammar())
+                : (string) $column;
+
+            $value = trim($value);
+
+            if ($value === 'rn' || preg_match('/\srn$/i', $value)) {
+                return true;
+            }
+        }
+
+        return false;
+    }
+}
